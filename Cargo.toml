@@ -1,0 +1,71 @@
+[package]
+name = "openchime"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "openchime"
+path = "src/lib.rs"
+
+[dependencies]
+# iced for UI
+iced = { version = "0.12", features = ["tokio", "image", "canvas", "debug"] }
+
+# Database
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "chrono", "uuid"] }
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# HTTP client
+reqwest = { version = "0.11", features = ["json"] }
+
+# OAuth2
+oauth2 = "4.4"
+base64 = "0.21"
+url = "2.4"
+
+# Open URLs
+open = "5.0"
+
+# Calendar parsing
+icalendar = "0.15"
+
+# Audio
+rodio = "0.17"
+
+# Regex
+regex = "1.0"
+
+# UUID
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# System directories
+dirs = "5.0"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Circuit breaker
+lazy_static = "1.4"
+
+# Logging
+log = "0.4"
+env_logger = "0.10"
+
+[dev-dependencies]
+# Testing utilities
+tempfile = "3.8"
+tokio-test = "0.4"
+mockall = "0.12"
+serial_test = "3.0"
+
+[build-dependencies]
