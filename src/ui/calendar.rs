@@ -2,6 +2,7 @@
 
 use iced::widget::{button, column, container, row, text, scrollable};
 use iced::{Element, Length, Alignment};
+use chrono::TimeZone;
 use crate::models::CalendarEvent;
 use crate::ui::{view_event, palette};
 
@@ -21,7 +22,7 @@ impl CalendarView {
     pub fn new() -> Self {
         Self {
             events: Vec::new(),
-            selected_date: chrono::Utc::now().date_naive(),
+            selected_date: chrono::Local::now().date_naive(),
         }
     }
 
@@ -65,10 +66,17 @@ impl CalendarView {
         .center_x();
 
         // 2. Event List
-        let events_for_day: Vec<_> = self.events
+        let mut events_for_day: Vec<_> = self.events
             .iter()
-            .filter(|event| event.start_time.date_naive() == self.selected_date)
+            .filter(|event| {
+                // Convert UTC time to local timezone for comparison
+                let event_local_date = chrono::Local.from_utc_datetime(&event.start_time.naive_utc()).date_naive();
+                event_local_date == self.selected_date
+            })
             .collect();
+        
+        // Ensure events are sorted chronologically within the day
+        events_for_day.sort_by(|a, b| a.start_time.cmp(&b.start_time));
 
         let content = if events_for_day.is_empty() {
             container(

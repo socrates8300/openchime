@@ -4,6 +4,12 @@
 use std::sync::Arc;
 use log::{info, error};
 use iced::futures::SinkExt; // Import SinkExt for sender.send()
+use chrono::TimeZone;
+
+// Helper function to get current local time for the user's timezone
+fn get_local_now() -> chrono::DateTime<chrono::Local> {
+    chrono::Local::now()
+}
 
 // Helper function to convert technical errors to user-friendly messages
 fn user_friendly_error(error: &str) -> String {
@@ -48,11 +54,23 @@ use database::Database;
 use audio::AudioManager;
 use models::{Account, Settings, CalendarEvent};
 use ui_state::{UiState, View};
-use command_handlers::CommandHandlers;
+
 
 use iced::widget::{button, column, row, text, text_input, container, scrollable, checkbox};
 use iced::{Application, Command, Element, Settings as IcedSettings, Theme, Length};
 use log::warn;
+
+/// Determine calendar provider based on URL
+fn detect_provider_from_url(url: &str) -> crate::models::CalendarProvider {
+    if url.contains("google.com/calendar") {
+        crate::models::CalendarProvider::Google
+    } else if url.contains("proton.me") {
+        crate::models::CalendarProvider::Proton
+    } else {
+        // Default to Proton for unknown URLs to maintain backward compatibility
+        crate::models::CalendarProvider::Proton
+    }
+}
 
 // Zen Theme Colors
 const ZEN_BG: iced::Color = iced::Color::from_rgb(0.992, 0.988, 0.973); // #FDFCF8
@@ -136,9 +154,6 @@ pub struct OpenChimeApp {
     db: Arc<Database>,
     audio: Arc<AudioManager>,
     
-    // Command handlers for async operations
-    handlers: CommandHandlers,
-    
     // UI state management
     ui_state: UiState,
     
@@ -162,12 +177,9 @@ impl Application for OpenChimeApp {
     type Flags = (Arc<Database>, Arc<AudioManager>);
 
     fn new((db, audio): Self::Flags) -> (Self, Command<Message>) {
-        let handlers = CommandHandlers::new(&db, &audio);
-        
         let app = OpenChimeApp {
             db,
             audio,
-            handlers,
             ui_state: UiState::new(),
             events: Vec::new(),
             settings: Settings::default(),
@@ -177,10 +189,17 @@ impl Application for OpenChimeApp {
         // Load events and accounts on startup
         let db_clone = app.db.clone();
         let startup_command = Command::perform(async move {
-            // Load existing events from database
+            // Load upcoming events from database (starting now to next 6 months)
+            // Use local time for filtering to match user's timezone
+            let local_now = get_local_now();
+            let now_utc = local_now.with_timezone(&chrono::Utc);
+            let six_months_ahead = now_utc + chrono::Duration::days(180);
+
             let events = match sqlx::query_as::<_, crate::models::CalendarEvent>(
-                "SELECT id, external_id, account_id, title, description, start_time, end_time, video_link, video_platform, snooze_count, has_alerted, last_alert_threshold, is_dismissed, created_at, updated_at FROM events   ORDER BY start_time ASC LIMIT 50"
+                "SELECT id, external_id, account_id, title, description, start_time, end_time, video_link, video_platform, snooze_count, has_alerted, last_alert_threshold, is_dismissed, created_at, updated_at FROM events WHERE start_time >= ? AND start_time <= ? AND is_dismissed = 0 ORDER BY start_time ASC"
             )
+            .bind(now_utc)
+            .bind(six_months_ahead)
             .fetch_all(&db_clone.pool)
             .await {
                 Ok(events) => events,
@@ -299,7 +318,20 @@ impl Application for OpenChimeApp {
                     return Command::none();
                 }
                 
-                let account = Account::new_proton(self.ui_state.account_name.clone(), self.ui_state.ics_url.clone());
+                let url = self.ui_state.ics_url.clone();
+                let account_name = self.ui_state.account_name.clone();
+                let provider = detect_provider_from_url(&url);
+                
+                // Create account with the correct provider
+                let account = match provider {
+                    crate::models::CalendarProvider::Google => {
+                        Account::new_google(account_name, url, None)
+                    }
+                    crate::models::CalendarProvider::Proton => {
+                        Account::new_proton(account_name, url)
+                    }
+                };
+                
                 let db = self.db.clone();
                 
                 Command::perform(async move {
@@ -307,7 +339,7 @@ impl Application for OpenChimeApp {
                     sqlx::query(
                         "INSERT INTO accounts (provider, account_name, auth_data, created_at, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
                     )
-                    .bind("proton")
+                    .bind(&account.provider)
                     .bind(&account.account_name)
                     .bind(&account.auth_data)
                     .execute(&db.pool)
@@ -325,9 +357,15 @@ impl Application for OpenChimeApp {
                 // Reload events to show updated data
                 let db = self.db.clone();
                 Command::perform(async move {
+                    let local_now = get_local_now();
+                    let now_utc = local_now.with_timezone(&chrono::Utc);
+                    let six_months_ahead = now_utc + chrono::Duration::days(180);
+
                     sqlx::query_as::<_, crate::models::CalendarEvent>(
-                        "SELECT id, external_id, account_id, title, description, start_time, end_time, video_link, video_platform, snooze_count, has_alerted, last_alert_threshold, is_dismissed, created_at, updated_at FROM events   ORDER BY start_time ASC LIMIT 50"
+                        "SELECT id, external_id, account_id, title, description, start_time, end_time, video_link, video_platform, snooze_count, has_alerted, last_alert_threshold, is_dismissed, created_at, updated_at FROM events WHERE start_time >= ? AND start_time <= ? AND is_dismissed = 0 ORDER BY start_time ASC"
                     )
+                    .bind(now_utc)
+                    .bind(six_months_ahead)
                     .fetch_all(&db.pool)
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to reload events: {}", e))
@@ -461,9 +499,15 @@ impl Application for OpenChimeApp {
                         // Reload events to ensure UI shows up-to-date info
                          let db = self.db.clone();
                         let reload_cmd = Command::perform(async move {
+                            let local_now = get_local_now();
+                            let now_utc = local_now.with_timezone(&chrono::Utc);
+                            let six_months_ahead = now_utc + chrono::Duration::days(180);
+
                             sqlx::query_as::<_, crate::models::CalendarEvent>(
-                                "SELECT id, external_id, account_id, title, description, start_time, end_time, video_link, video_platform, snooze_count, has_alerted, last_alert_threshold, is_dismissed, created_at, updated_at FROM events   ORDER BY start_time ASC LIMIT 50"
+                                "SELECT id, external_id, account_id, title, description, start_time, end_time, video_link, video_platform, snooze_count, has_alerted, last_alert_threshold, is_dismissed, created_at, updated_at FROM events WHERE start_time >= ? AND start_time <= ? AND is_dismissed = 0 ORDER BY start_time ASC"
                             )
+                            .bind(now_utc)
+                            .bind(six_months_ahead)
                             .fetch_all(&db.pool)
                             .await
                             .map_err(|e| anyhow::anyhow!("Failed to reload events: {}", e))
@@ -484,9 +528,15 @@ impl Application for OpenChimeApp {
                             // Refresh events list
                             let db = self.db.clone();
                             Command::perform(async move {
+                                let local_now = get_local_now();
+                                let now_utc = local_now.with_timezone(&chrono::Utc);
+                                let six_months_ahead = now_utc + chrono::Duration::days(180);
+
                                 sqlx::query_as::<_, crate::models::CalendarEvent>(
-                                    "SELECT id, external_id, account_id, title, description, start_time, end_time, video_link, video_platform, snooze_count, has_alerted, last_alert_threshold, is_dismissed, created_at, updated_at FROM events   ORDER BY start_time ASC LIMIT 50"
+                                    "SELECT id, external_id, account_id, title, description, start_time, end_time, video_link, video_platform, snooze_count, has_alerted, last_alert_threshold, is_dismissed, created_at, updated_at FROM events WHERE start_time >= ? AND start_time <= ? AND is_dismissed = 0 ORDER BY start_time ASC"
                                 )
+                                .bind(now_utc)
+                                .bind(six_months_ahead)
                                 .fetch_all(&db.pool)
                                 .await
                                 .map_err(|e| anyhow::anyhow!("Failed to reload events: {}", e))
@@ -910,17 +960,21 @@ impl OpenChimeApp {
             // Group events by date
             let mut events_by_date: std::collections::BTreeMap<String, Vec<&CalendarEvent>> = std::collections::BTreeMap::new();
             for event in &self.events {
-                let date = event.start_time.format("%Y-%m-%d").to_string();
+                // Convert UTC to local timezone for proper date grouping
+                let local_time = chrono::Local.from_utc_datetime(&event.start_time.naive_utc());
+                let date = local_time.format("%Y-%m-%d").to_string();
                 events_by_date.entry(date).or_default().push(event);
             }
             
             let mut event_cards = Vec::new();
             
-            for (date_str, day_events) in events_by_date {
+            for (date_str, mut day_events) in events_by_date {
+                // Sort events chronologically within each day
+                day_events.sort_by(|a, b| a.start_time.cmp(&b.start_time));
                 // Parse date to show friendly format
                 let date_parsed = chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").unwrap_or_default();
                 let friendly_date = date_parsed.format("%A, %B %d").to_string();
-                let is_today = date_str == chrono::Utc::now().format("%Y-%m-%d").to_string();
+                let is_today = date_str == get_local_now().format("%Y-%m-%d").to_string();
 
                 let date_header = row![
                     text(if is_today { "Today" } else { &friendly_date })

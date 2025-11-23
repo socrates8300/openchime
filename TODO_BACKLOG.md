@@ -1,7 +1,19 @@
 # TODO Backlog - Code Review Items
 
 ## Critical Priority
-*None identified in initial analysis*
+
+### C1: OAuth Token Security Assessment
+**Owner:** Security Team  
+**Effort:** High (3-5 days)  
+**Description:** OAuth tokens stored in SQLite without apparent encryption at rest  
+**Acceptance Criteria:**
+- Audit OAuth2 token storage in database/auth_data column
+- Assess encryption requirements for sensitive tokens
+- Review token refresh logic for security vulnerabilities
+- Validate HTTPS enforcement for all OAuth flows
+
+**Impact:** Critical security risk - compromised tokens could grant calendar access  
+**Evidence:** `src/database/schema.sql` line 11 - auth_data TEXT NOT NULL (no encryption noted)
 
 ## High Priority
 
@@ -28,6 +40,32 @@
 
 **Impact:** Prevents application crashes, improves robustness  
 **Status:** ✅ **COMPLETED** - Fixed critical initialization errors and panic-prone code
+
+### H3: Async Monitoring Loop Lifecycle Management
+**Owner:** Development Team  
+**Effort:** Medium (2-3 days)  
+**Description:** Background monitoring loop runs indefinitely without clear cancellation or shutdown handling  
+**Acceptance Criteria:**
+- Implement graceful shutdown mechanism for monitoring loop
+- Add resource cleanup when application exits
+- Assess memory leak risks in long-running operations
+- Review thread/sync primitives usage for safety
+
+**Impact:** Potential resource leaks, application hang on exit  
+**Evidence:** `src/alerts/mod.rs` lines 21-25 - infinite loop with no cancellation token visible
+
+### H4: Database Connection Pool Management
+**Owner:** Development Team  
+**Effort:** Medium (1-2 days)  
+**Description:** Single database pool used across async operations, unclear connection lifecycle  
+**Acceptance Criteria:**
+- Review sqlx connection pool configuration and limits
+- Implement proper connection cleanup on application shutdown
+- Add connection health monitoring for long-running operations
+- Assess concurrent access patterns for safety
+
+**Impact:** Database connection exhaustion, potential application crashes under load  
+**Evidence:** `src/database/mod.rs` lines 16-22 - single pool creation without apparent lifecycle management
 
 ## Medium Priority
 

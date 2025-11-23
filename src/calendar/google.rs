@@ -8,7 +8,7 @@ use crate::models::{Account, SyncResult, CalendarEvent};
 use crate::utils::{logging, circuit_breaker::get_circuit_breaker};
 use crate::utils::retry::RetryConfig;
 use anyhow::{Result, anyhow};
-use chrono::{DateTime, Utc, Duration};
+use chrono::{DateTime, Utc, Duration, TimeZone, Datelike};
 use oauth2::{
     AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge, RedirectUrl,
     RefreshToken, Scope, TokenResponse, basic::BasicClient, reqwest::async_http_client,
@@ -17,6 +17,8 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
+use std::str::FromStr;
+use icalendar::{Component, Event as IcsEvent, EventLike, Calendar as IcsCalendar};
 
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -54,19 +56,25 @@ pub async fn sync_google_calendar(account: &Account, db: &sqlx::SqlitePool) -> R
     let start_time = Instant::now();
     log::info!("Starting Google calendar sync for account: {}", account.account_name);
     
-    // Parse OAuth tokens from account.auth_data
-    let token_data: GoogleTokenResponse = serde_json::from_str(&account.auth_data)
-        .map_err(|e| anyhow!("Failed to parse token data: {}", e))?;
-    
-    // Check if tokens need refresh
-    let access_token = if needs_refresh(&token_data) {
-        refresh_access_token(account).await?
+    // Check if auth_data is an ICS URL or OAuth tokens
+    let events = if account.auth_data.contains("google.com/calendar") {
+        // Handle ICS URL import (like Proton)
+        sync_google_ics(account).await?
     } else {
-        token_data.access_token
+        // Handle OAuth API access
+        let token_data: GoogleTokenResponse = serde_json::from_str(&account.auth_data)
+            .map_err(|e| anyhow!("Failed to parse token data: {}", e))?;
+        
+        // Check if tokens need refresh
+        let access_token = if needs_refresh(&token_data) {
+            refresh_access_token(account).await?
+        } else {
+            token_data.access_token
+        };
+        
+        // Fetch events from Google Calendar API
+        fetch_calendar_events(&access_token).await?
     };
-    
-    // Fetch events from Google Calendar API
-    let events = fetch_calendar_events(&access_token).await?;
     
     // Store/update events in database
     let mut events_added = 0;
@@ -386,4 +394,140 @@ pub fn get_auth_url() -> Result<(String, CsrfToken, PkceCodeChallenge)> {
         .url();
     
     Ok((auth_url.to_string(), csrf_token, pkce_challenge))
+}
+
+/// Handle Google Calendar sync via ICS URL (similar to Proton)
+async fn sync_google_ics(account: &Account) -> Result<Vec<GoogleCalendarEvent>> {
+    let ics_url = &account.auth_data;
+    log::info!("Fetching Google ICS data from URL: {}", ics_url);
+    
+    // Fetch ICS data
+    let ics_data = fetch_ics_data(ics_url).await?;
+    log::info!("Fetched {} bytes of Google ICS data", ics_data.len());
+    
+    // Check if we got HTML instead of ICS (indicates auth issues)
+    if ics_data.trim().starts_with("<!doctype html") || ics_data.trim().starts_with("<html") {
+        log::warn!("Content does not contain BEGIN:VCALENDAR.");
+        log::warn!("Parsed 0 events. ICS data size: {} bytes. First 100 chars: {}", 
+                  ics_data.len(), &ics_data.chars().take(100).collect::<String>());
+        return Ok(Vec::new());
+    }
+    
+    // Parse ICS data to Google Calendar events
+    let events = parse_ics_to_google_events(&ics_data)?;
+    log::info!("Parsed {} events from Google ICS data", events.len());
+    
+    Ok(events)
+}
+
+/// Fetch ICS data from URL (similar to Proton implementation)
+async fn fetch_ics_data(ics_url: &str) -> Result<String> {
+    let client = Client::new();
+    let response = client
+        .get(ics_url)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| anyhow!("Failed to fetch ICS data: {}", e))?;
+    
+    if !response.status().is_success() {
+        return Err(anyhow!("HTTP error: {}", response.status()));
+    }
+    
+    let content = response
+        .text()
+        .await
+        .map_err(|e| anyhow!("Failed to read response: {}", e))?;
+    
+    Ok(content)
+}
+
+/// Parse ICS data to Google Calendar events (simplified conversion)
+fn parse_ics_to_google_events(ics_data: &str) -> Result<Vec<GoogleCalendarEvent>> {
+    use icalendar::Calendar as IcsCalendar;
+    
+    let calendar = IcsCalendar::from_str(ics_data)
+        .map_err(|e| anyhow!("Failed to parse ICS: {}", e))?;
+    
+    let mut events = Vec::new();
+    
+    for component in calendar.components {
+        if let Some(ics_event) = component.as_event() {
+            let event = convert_ics_event_to_google(ics_event)?;
+            events.push(event);
+        }
+    }
+    
+    Ok(events)
+}
+
+/// Convert ICS VEVENT to GoogleCalendarEvent
+fn convert_ics_event_to_google(ics_event: &icalendar::Event) -> Result<GoogleCalendarEvent> {
+    use icalendar::EventLike;
+    
+    // Extract basic event properties
+    let summary = ics_event.get_summary().map(|s| s.to_string());
+    let description = ics_event.get_description().map(|d| d.to_string());
+    let start_time = ics_event.get_start()
+        .as_ref()
+        .and_then(parse_ical_datetime)
+        .map(|dt| dt.with_timezone(&Utc));
+    let end_time = ics_event.get_end()
+        .as_ref()
+        .and_then(parse_ical_datetime)
+        .map(|dt| dt.with_timezone(&Utc));
+    
+    // Generate event ID
+    let id = ics_event.get_uid().map(|uid| uid.to_string())
+        .unwrap_or_else(|| format!("ics_{}", uuid::Uuid::new_v4()));
+    
+    // Parse video meeting links
+    let (video_link, _video_platform) = extract_video_info(&description);
+    
+    Ok(GoogleCalendarEvent {
+        id,
+        summary,
+        description,
+        start: GoogleEventTime {
+            date_time: start_time,
+            date: None,
+        },
+        end: GoogleEventTime {
+            date_time: end_time,
+            date: None,
+        },
+        hangout_link: video_link,
+    })
+}
+
+/// Parse ICS datetime (reusing Proton's approach)
+fn parse_ical_datetime(dt: &icalendar::DatePerhapsTime) -> Option<DateTime<Utc>> {
+    match dt {
+        icalendar::DatePerhapsTime::DateTime(dt) => {
+            match dt {
+                icalendar::CalendarDateTime::Utc(dt) => Some(dt.naive_utc().and_utc()),
+                icalendar::CalendarDateTime::Floating(dt) => Some(dt.and_utc()),
+                icalendar::CalendarDateTime::WithTimezone { date_time, .. } => Some(date_time.and_utc()),
+            }
+        }
+        icalendar::DatePerhapsTime::Date(date) => {
+            // For date-only events, assume start of day in UTC
+            Utc.with_ymd_and_hms(date.year(), date.month(), date.day(), 0, 0, 0)
+                .single()
+        }
+    }
+}
+
+/// Extract video meeting information from description
+fn extract_video_info(description: &Option<String>) -> (Option<String>, Option<String>) {
+    if let Some(desc) = description {
+        if desc.contains("meet.google.com") || desc.contains("hangouts.google.com") {
+            return (Some(desc.clone()), Some("Google Meet".to_string()));
+        } else if desc.contains("zoom.us") || desc.contains("zoom.com") {
+            return (Some(desc.clone()), Some("Zoom".to_string()));
+        } else if desc.contains("teams.microsoft.com") {
+            return (Some(desc.clone()), Some("Microsoft Teams".to_string()));
+        }
+    }
+    (None, None)
 }

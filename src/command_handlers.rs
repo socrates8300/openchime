@@ -13,21 +13,30 @@ use log::{info, error};
 use anyhow::anyhow;
 
 /// Database operation handlers
+#[allow(dead_code)]
 pub struct DatabaseHandlers {
     pub db: Database,
 }
 
 impl DatabaseHandlers {
+    #[allow(dead_code)]
     pub fn new(db: Database) -> Self {
         Self { db }
     }
 
     /// Load all events from database
+    #[allow(dead_code)]
     pub async fn load_events(&self) -> Result<Vec<CalendarEvent>, AppError> {
         info!("Loading events from database");
+        let local_now = chrono::Local::now();
+        let now_utc = local_now.with_timezone(&chrono::Utc);
+        let six_months_ahead = now_utc + chrono::Duration::days(180);
+
         let events = sqlx::query_as::<_, CalendarEvent>(
-            "SELECT id, external_id, account_id, title, description, start_time, end_time, video_link, video_platform, snooze_count, has_alerted, last_alert_threshold, is_dismissed, created_at, updated_at FROM events ORDER BY start_time ASC LIMIT 50"
+            "SELECT id, external_id, account_id, title, description, start_time, end_time, video_link, video_platform, snooze_count, has_alerted, last_alert_threshold, is_dismissed, created_at, updated_at FROM events WHERE start_time >= ? AND start_time <= ? AND is_dismissed = 0 ORDER BY start_time ASC"
         )
+        .bind(now_utc)
+        .bind(six_months_ahead)
         .fetch_all(&self.db.pool)
         .await
         .map_err(|e| AppError::Database(e))?;
@@ -37,6 +46,7 @@ impl DatabaseHandlers {
     }
 
     /// Load all accounts from database
+    #[allow(dead_code)]
     pub async fn load_accounts(&self) -> Result<Vec<Account>, AppError> {
         info!("Loading accounts from database");
         let accounts = sqlx::query_as::<_, Account>(
@@ -51,13 +61,14 @@ impl DatabaseHandlers {
     }
 
     /// Add a new account to database
+    #[allow(dead_code)]
     pub async fn add_account(&self, account: Account) -> Result<Account, AppError> {
-        info!("Adding account: {}", account.account_name);
+        info!("Adding account: {} ({})", account.account_name, account.provider);
         
         sqlx::query(
             "INSERT INTO accounts (provider, account_name, auth_data, created_at, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
         )
-        .bind("proton")
+        .bind(&account.provider)
         .bind(&account.account_name)
         .bind(&account.auth_data)
         .execute(&self.db.pool)
@@ -69,6 +80,7 @@ impl DatabaseHandlers {
     }
 
     /// Delete an account from database
+    #[allow(dead_code)]
     pub async fn delete_account(&self, account_id: i64) -> Result<(), AppError> {
         info!("Deleting account ID: {}", account_id);
         
@@ -83,6 +95,7 @@ impl DatabaseHandlers {
     }
 
     /// Update settings in database
+    #[allow(dead_code)]
     pub async fn update_settings(&self, settings: &Settings) -> Result<(), AppError> {
         info!("Updating settings in database");
         crate::database::settings::update(&self.db.pool, settings)
@@ -92,16 +105,19 @@ impl DatabaseHandlers {
 }
 
 /// Calendar operation handlers
+#[allow(dead_code)]
 pub struct CalendarHandlers {
     pub db: Database,
 }
 
 impl CalendarHandlers {
+    #[allow(dead_code)]
     pub fn new(db: Database) -> Self {
         Self { db }
     }
 
     /// Synchronize all calendar accounts
+    #[allow(dead_code)]
     pub async fn sync_calendars(&self) -> Result<(usize, usize), AppError> {
         info!("Starting calendar synchronization");
         
@@ -146,6 +162,7 @@ impl CalendarHandlers {
 }
 
 /// Test audio system
+#[allow(dead_code)]
 pub async fn test_audio(audio: &AudioManager) -> Result<(), AppError> {
     info!("Testing audio system");
     audio.play_alert(crate::audio::AlertType::Meeting)
@@ -153,6 +170,7 @@ pub async fn test_audio(audio: &AudioManager) -> Result<(), AppError> {
 }
 
 /// Command handler factory
+#[allow(dead_code)]
 pub struct CommandHandlers {
     pub database: DatabaseHandlers,
     pub calendar: CalendarHandlers,
@@ -160,6 +178,7 @@ pub struct CommandHandlers {
 }
 
 impl CommandHandlers {
+    #[allow(dead_code)]
     pub fn new(db: &std::sync::Arc<Database>, audio: &std::sync::Arc<AudioManager>) -> Self {
         Self {
             database: DatabaseHandlers::new(db.as_ref().clone()),
