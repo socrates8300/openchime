@@ -56,6 +56,11 @@ mod tests {
             start_time: now + Duration::minutes(5),
             end_time: now + Duration::hours(1),
             video_link: Some("https://meet.google.com/abc-def".to_string()),
+            video_platform: Some("Google Meet".to_string()),
+            snooze_count: 0,
+            has_alerted: false,
+            last_alert_threshold: None,
+            is_dismissed: false,
             created_at: now,
             updated_at: now,
         };

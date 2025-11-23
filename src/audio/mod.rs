@@ -7,6 +7,7 @@ use std::time::Duration;
 use log::{info, error, warn, debug};
 use anyhow::{Result, Context};
 
+#[derive(Clone)]
 pub struct AudioManager {
     volume: Arc<Mutex<f32>>,
     sound_files: Arc<Mutex<SoundFiles>>,
@@ -36,6 +37,25 @@ impl AudioManager {
             volume,
             sound_files,
         })
+    }
+    
+    /// Create a dummy audio manager that does nothing
+    /// Used when audio system initialization fails
+    pub fn new_dummy() -> Self {
+        warn!("Using dummy audio manager - audio features will be disabled");
+        
+        AudioManager {
+            volume: Arc::new(Mutex::new(0.0)), // Silent by default
+            sound_files: Arc::new(Mutex::new(SoundFiles {
+                meeting_alert: PathBuf::new(),
+                video_meeting_alert: PathBuf::new(),
+                test_sound: PathBuf::new(),
+                alert_30m: PathBuf::new(),
+                alert_10m: PathBuf::new(),
+                alert_5m: PathBuf::new(),
+                alert_1m: PathBuf::new(),
+            })),
+        }
     }
     
     fn default_sound_files() -> Result<SoundFiles> {

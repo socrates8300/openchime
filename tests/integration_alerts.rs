@@ -33,6 +33,15 @@ fn create_test_event(minutes_from_now: i64, has_video: bool) -> CalendarEvent {
         } else {
             None
         },
+        video_platform: if has_video {
+            Some("Zoom".to_string())
+        } else {
+            None
+        },
+        snooze_count: 0,
+        has_alerted: false,
+        last_alert_threshold: None,
+        is_dismissed: false,
         created_at: now,
         updated_at: now,
     }
@@ -205,6 +214,11 @@ fn test_alert_info_edge_cases() {
         start_time: now + Duration::minutes(3), // Exactly at video threshold
         end_time: now + Duration::minutes(63),
         video_link: Some("https://zoom.us/test".to_string()),
+        video_platform: Some("Zoom".to_string()),
+        snooze_count: 0,
+        has_alerted: false,
+        last_alert_threshold: None,
+        is_dismissed: false,
         created_at: now,
         updated_at: now,
     };

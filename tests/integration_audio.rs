@@ -50,7 +50,11 @@ async fn test_sound_file_configuration() {
     let sound_files = openchime::SoundFiles {
         meeting_alert: meeting_sound,
         video_meeting_alert: video_sound,
-        test_sound: test_sound,
+        test_sound: test_sound.clone(),
+        alert_30m: test_sound.clone(),
+        alert_10m: test_sound.clone(),
+        alert_5m: test_sound.clone(),
+        alert_1m: test_sound.clone(),
     };
     
     manager.update_sound_files(sound_files).unwrap();
@@ -104,6 +108,10 @@ fn test_sound_files_struct() {
         meeting_alert: temp_dir.path().join("meeting.wav"),
         video_meeting_alert: temp_dir.path().join("video.wav"),
         test_sound: temp_dir.path().join("test.wav"),
+        alert_30m: temp_dir.path().join("alert_30m.wav"),
+        alert_10m: temp_dir.path().join("alert_10m.wav"),
+        alert_5m: temp_dir.path().join("alert_5m.wav"),
+        alert_1m: temp_dir.path().join("alert_1m.wav"),
     };
     
     assert!(sound_files.meeting_alert.ends_with("meeting.wav"));
@@ -125,6 +133,10 @@ fn test_alert_type_matching() {
             AlertType::VideoMeeting => assert!(true),
             AlertType::SnoozeReminder => assert!(true),
             AlertType::Test => assert!(true),
+            AlertType::Warning30m => assert!(true),
+            AlertType::Warning10m => assert!(true),
+            AlertType::Warning5m => assert!(true),
+            AlertType::Warning1m => assert!(true),
         }
     }
 }

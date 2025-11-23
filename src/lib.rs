@@ -8,6 +8,8 @@ pub mod alerts;
 pub mod audio;
 pub mod utils;
 pub mod error;
+pub mod command_handlers;
+pub mod http_config;
 
 // Re-export commonly used types
 pub use models::*;

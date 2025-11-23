@@ -183,10 +183,9 @@ async fn play_alert_sound(event: &CalendarEvent, state: &AppState, alert_type: A
 }
 
 async fn show_alert_window(event: &CalendarEvent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // TODO: Implement Tauri alert window
     info!("Showing alert window for event: {}", event.title);
     
-    // For now, just log - will implement with Tauri commands later
+    // Alert window display is handled by the main application UI
     Ok(())
 }
 
@@ -267,6 +266,15 @@ mod tests {
             } else {
                 None
             },
+            video_platform: if has_video {
+                Some("Zoom".to_string())
+            } else {
+                None
+            },
+            snooze_count: 0,
+            has_alerted: false,
+            last_alert_threshold: None,
+            is_dismissed: false,
             created_at: now,
             updated_at: now,
         }
@@ -370,7 +378,7 @@ mod tests {
         let state = Arc::new(crate::AppState { db, audio });
 
         // This should not panic even if sound file doesn't exist
-        let result = play_alert_sound(&event, &state).await;
+        let result = play_alert_sound(&event, &state, crate::models::AlertType::VideoMeeting).await;
         assert!(result.is_ok());
     }
 

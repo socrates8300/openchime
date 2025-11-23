@@ -252,7 +252,8 @@ fn parse_ical_datetime(dt: &icalendar::DatePerhapsTime) -> Option<DateTime<Utc>>
         }
         icalendar::DatePerhapsTime::Date(date) => {
             // For date-only events, assume start of day in UTC
-            Some(Utc.with_ymd_and_hms(date.year(), date.month(), date.day(), 0, 0, 0).unwrap())
+            Utc.with_ymd_and_hms(date.year(), date.month(), date.day(), 0, 0, 0)
+                .single()
         }
     }
 }

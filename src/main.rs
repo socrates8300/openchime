@@ -41,14 +41,18 @@ mod alerts;
 mod audio;
 mod utils;
 mod error;
-// mod ui; // Temporarily disabled for compilation
+mod ui_state;
+mod command_handlers;
 
 use database::Database;
 use audio::AudioManager;
 use models::{Account, Settings, CalendarEvent};
+use ui_state::{UiState, View};
+use command_handlers::CommandHandlers;
 
 use iced::widget::{button, column, row, text, text_input, container, scrollable, checkbox};
 use iced::{Application, Command, Element, Settings as IcedSettings, Theme, Length};
+use log::warn;
 
 // Zen Theme Colors
 const ZEN_BG: iced::Color = iced::Color::from_rgb(0.992, 0.988, 0.973); // #FDFCF8
@@ -62,44 +66,69 @@ const ZEN_DESTRUCTIVE: iced::Color = iced::Color::from_rgb(0.831, 0.647, 0.647);
 // Styles
 // (All helper functions removed, using structs below)
 
+/// Unified application message type
+/// 
+/// This enum handles all message types throughout the application.
+/// Messages are organized by domain for better maintainability.
 #[derive(Debug, Clone)]
 pub enum Message {
-    // UI messages
+    // ===== UI Navigation Messages =====
+    /// Switch to calendar view
     ShowCalendar,
+    /// Switch to settings view
     ShowSettings,
+    /// Switch to alerts view
     ShowAlerts,
+    
+    // ===== UI Action Messages =====
+    /// Trigger manual calendar synchronization
     SyncCalendars,
+    /// Test audio system
     TestAudio,
+    /// Join meeting with provided URL
+    JoinMeeting(String),
     
-    // Input messages
+    // ===== Settings Management Messages =====
+    /// Update account name input
     AccountNameChanged(String),
+    /// Update ICS URL input
     IcsUrlChanged(String),
+    /// Add Proton calendar account
     AddProtonAccount,
+    /// Delete account by ID
     DeleteAccount(i64),
-    
-    // Settings messages
+    /// Toggle 30-minute alert
     ToggleAlert30m(bool),
+    /// Toggle 10-minute alert
     ToggleAlert10m(bool),
+    /// Toggle 5-minute alert
     ToggleAlert5m(bool),
+    /// Toggle 1-minute alert
     ToggleAlert1m(bool),
+    /// Toggle default alert settings
     ToggleAlertDefault(bool),
     
-    // Async result messages
+    // ===== Async Operation Result Messages =====
+    /// Calendar synchronization completed
     CalendarSyncResult(Result<(), String>),
+    /// Audio test completed
     AudioTestResult(Result<(), String>),
+    /// Account addition completed
     AccountAdded(Result<Account, String>),
+    /// Account deletion completed
     AccountDeleted(Result<(), String>),
     
-    // Data messages
+    // ===== Data Update Messages =====
+    /// Events data has been updated
     EventsUpdated(Vec<CalendarEvent>),
+    /// Settings data has been updated
     SettingsUpdated(Settings),
+    /// Initial data loading completed
     DataLoaded(Vec<CalendarEvent>, Vec<Account>),
     
-    // Monitor messages
+    // ===== Monitor System Messages =====
+    /// Background monitor event received
     MonitorEventReceived(crate::alerts::MonitorEvent),
-    
-    // Action messages
-    JoinMeeting(String),
 }
 
 pub struct OpenChimeApp {
@@ -107,27 +136,16 @@ pub struct OpenChimeApp {
     db: Arc<Database>,
     audio: Arc<AudioManager>,
     
-    // UI state
-    current_view: View,
-    account_name: String,
-    ics_url: String,
+    // Command handlers for async operations
+    handlers: CommandHandlers,
+    
+    // UI state management
+    ui_state: UiState,
     
     // Data
     events: Vec<CalendarEvent>,
     settings: Settings,
     accounts: Vec<Account>,
-    
-    // Status
-    sync_status: String,
-    loading: bool,
-    last_sync_time: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum View {
-    Calendar,
-    Settings,
-    Alerts,
 }
 
 // State for alerts module
@@ -144,18 +162,16 @@ impl Application for OpenChimeApp {
     type Flags = (Arc<Database>, Arc<AudioManager>);
 
     fn new((db, audio): Self::Flags) -> (Self, Command<Message>) {
+        let handlers = CommandHandlers::new(&db, &audio);
+        
         let app = OpenChimeApp {
             db,
             audio,
-            current_view: View::Calendar,
-            account_name: String::new(),
-            ics_url: String::new(),
+            handlers,
+            ui_state: UiState::new(),
             events: Vec::new(),
             settings: Settings::default(),
             accounts: Vec::new(),
-            sync_status: "Ready".to_string(),
-            loading: false,
-            last_sync_time: None,
         };
         
         // Load events and accounts on startup
@@ -163,7 +179,7 @@ impl Application for OpenChimeApp {
         let startup_command = Command::perform(async move {
             // Load existing events from database
             let events = match sqlx::query_as::<_, crate::models::CalendarEvent>(
-                "SELECT id, external_id, account_id, title, description, start_time, end_time, video_link, video_platform, snooze_count, has_alerted, last_alert_threshold, is_dismissed, created_at, updated_at FROM events ORDER BY start_time ASC LIMIT 50"
+                "SELECT id, external_id, account_id, title, description, start_time, end_time, video_link, video_platform, snooze_count, has_alerted, last_alert_threshold, is_dismissed, created_at, updated_at FROM events   ORDER BY start_time ASC LIMIT 50"
             )
             .fetch_all(&db_clone.pool)
             .await {
@@ -200,20 +216,20 @@ impl Application for OpenChimeApp {
     fn update(&mut self, message: Message) -> Command<Message> {
         match message {
             Message::ShowCalendar => {
-                self.current_view = View::Calendar;
+                self.ui_state.current_view = View::Calendar;
                 Command::none()
             }
             Message::ShowSettings => {
-                self.current_view = View::Settings;
+                self.ui_state.current_view = View::Settings;
                 Command::none()
             }
             Message::ShowAlerts => {
-                self.current_view = View::Alerts;
+                self.ui_state.current_view = View::Alerts;
                 Command::none()
             }
             Message::SyncCalendars => {
-                self.sync_status = "Fetching accounts...".to_string();
-                self.loading = true;
+                self.ui_state.sync_status = "Fetching accounts...".to_string();
+                self.ui_state.loading = true;
                 let db = self.db.clone();
                 Command::perform(async move {
                     // Get all accounts and sync them
@@ -271,19 +287,19 @@ impl Application for OpenChimeApp {
                 }, |result: Result<(), anyhow::Error>| Message::AudioTestResult(result.map_err(|e| e.to_string())))
             }
             Message::AccountNameChanged(name) => {
-                self.account_name = name;
+                self.ui_state.account_name = name;
                 Command::none()
             }
             Message::IcsUrlChanged(url) => {
-                self.ics_url = url;
+                self.ui_state.ics_url = url;
                 Command::none()
             }
             Message::AddProtonAccount => {
-                if self.account_name.is_empty() || self.ics_url.is_empty() {
+                if self.ui_state.account_name.is_empty() || self.ui_state.ics_url.is_empty() {
                     return Command::none();
                 }
                 
-                let account = Account::new_proton(self.account_name.clone(), self.ics_url.clone());
+                let account = Account::new_proton(self.ui_state.account_name.clone(), self.ui_state.ics_url.clone());
                 let db = self.db.clone();
                 
                 Command::perform(async move {
@@ -302,15 +318,15 @@ impl Application for OpenChimeApp {
                 }, |result: Result<Account, anyhow::Error>| Message::AccountAdded(result.map_err(|e| e.to_string())))
             }
             Message::CalendarSyncResult(Ok(())) => {
-                self.sync_status = "Sync completed successfully".to_string();
-                self.last_sync_time = Some(chrono::Utc::now());
-                self.loading = false;
+                self.ui_state.sync_status = "Sync completed successfully".to_string();
+                self.ui_state.last_sync_time = Some(chrono::Utc::now());
+                self.ui_state.loading = false;
                 log::info!("Sync completed successfully, reloading events...");
                 // Reload events to show updated data
                 let db = self.db.clone();
                 Command::perform(async move {
                     sqlx::query_as::<_, crate::models::CalendarEvent>(
-                        "SELECT id, external_id, account_id, title, description, start_time, end_time, video_link, video_platform, snooze_count, has_alerted, last_alert_threshold, is_dismissed, created_at, updated_at FROM events ORDER BY start_time ASC LIMIT 50"
+                        "SELECT id, external_id, account_id, title, description, start_time, end_time, video_link, video_platform, snooze_count, has_alerted, last_alert_threshold, is_dismissed, created_at, updated_at FROM events   ORDER BY start_time ASC LIMIT 50"
                     )
                     .fetch_all(&db.pool)
                     .await
@@ -326,8 +342,8 @@ impl Application for OpenChimeApp {
                 })
             }
             Message::CalendarSyncResult(Err(error)) => {
-                self.sync_status = user_friendly_error(&error);
-                self.loading = false;
+                self.ui_state.sync_status = user_friendly_error(&error);
+                self.ui_state.loading = false;
                 Command::none()
             }
             Message::AudioTestResult(Ok(())) => {
@@ -336,14 +352,14 @@ impl Application for OpenChimeApp {
             }
             Message::AudioTestResult(Err(error)) => {
                 let friendly_error = user_friendly_error(&error);
-                self.sync_status = friendly_error.clone();
+                self.ui_state.sync_status = friendly_error.clone();
                 error!("Audio test failed: {}", error);
                 Command::none()
             }
             Message::AccountAdded(Ok(account)) => {
                 info!("Account added: {}", account.account_name);
-                self.account_name.clear();
-                self.ics_url.clear();
+                self.ui_state.account_name.clear();
+                self.ui_state.ics_url.clear();
                 
                 // Reload accounts to show newly added account
                 let db = self.db.clone();
@@ -370,7 +386,7 @@ impl Application for OpenChimeApp {
             }
             Message::AccountAdded(Err(error)) => {
                 let friendly_error = user_friendly_error(&error);
-                self.sync_status = friendly_error.clone();
+                self.ui_state.sync_status = friendly_error.clone();
                 error!("Failed to add account: {}", error);
                 Command::none()
             }
@@ -387,7 +403,16 @@ impl Application for OpenChimeApp {
                 self.events = events.clone();
                 self.accounts = accounts.clone();
                 log::info!("Loaded {} events and {} accounts", events.len(), accounts.len());
-                Command::none()
+                
+                // Automatically trigger sync to fetch fresh events after loading
+                if accounts.len() > 0 {
+                    log::info!("Triggering initial calendar sync");
+                    self.ui_state.sync_status = "Initial sync...".to_string();
+                    self.ui_state.loading = true;
+                    Command::perform(async {}, |_| Message::SyncCalendars)
+                } else {
+                    Command::none()
+                }
             }
             Message::DeleteAccount(account_id) => {
                 let db = self.db.clone();
@@ -420,7 +445,7 @@ impl Application for OpenChimeApp {
             }
             Message::AccountDeleted(Err(error)) => {
                 let friendly_error = user_friendly_error(&error);
-                self.sync_status = friendly_error.clone();
+                self.ui_state.sync_status = friendly_error.clone();
                 error!("Failed to delete account: {}", error);
                 Command::none()
             }
@@ -428,7 +453,7 @@ impl Application for OpenChimeApp {
                 match event {
                     crate::alerts::MonitorEvent::AlertTriggered(_calendar_event) => {
                         // Switch to alerts view
-                        self.current_view = View::Alerts;
+                        self.ui_state.current_view = View::Alerts;
                         
                         // Request window attention (flash taskbar/bounce dock)
                         let attention_cmd = iced::window::request_user_attention(iced::window::Id::MAIN, Some(iced::window::UserAttention::Critical));
@@ -437,7 +462,7 @@ impl Application for OpenChimeApp {
                          let db = self.db.clone();
                         let reload_cmd = Command::perform(async move {
                             sqlx::query_as::<_, crate::models::CalendarEvent>(
-                                "SELECT id, external_id, account_id, title, description, start_time, end_time, video_link, video_platform, snooze_count, has_alerted, last_alert_threshold, is_dismissed, created_at, updated_at FROM events ORDER BY start_time ASC LIMIT 50"
+                                "SELECT id, external_id, account_id, title, description, start_time, end_time, video_link, video_platform, snooze_count, has_alerted, last_alert_threshold, is_dismissed, created_at, updated_at FROM events   ORDER BY start_time ASC LIMIT 50"
                             )
                             .fetch_all(&db.pool)
                             .await
@@ -453,14 +478,14 @@ impl Application for OpenChimeApp {
                     }
                     crate::alerts::MonitorEvent::SyncCompleted { added, updated } => {
                          if added > 0 || updated > 0 {
-                            self.last_sync_time = Some(chrono::Utc::now());
-                            self.sync_status = format!("Auto-sync: {} added, {} updated", added, updated);
+                            self.ui_state.last_sync_time = Some(chrono::Utc::now());
+                            self.ui_state.sync_status = format!("Auto-sync: {} added, {} updated", added, updated);
                             
                             // Refresh events list
                             let db = self.db.clone();
                             Command::perform(async move {
                                 sqlx::query_as::<_, crate::models::CalendarEvent>(
-                                    "SELECT id, external_id, account_id, title, description, start_time, end_time, video_link, video_platform, snooze_count, has_alerted, last_alert_threshold, is_dismissed, created_at, updated_at FROM events ORDER BY start_time ASC LIMIT 50"
+                                    "SELECT id, external_id, account_id, title, description, start_time, end_time, video_link, video_platform, snooze_count, has_alerted, last_alert_threshold, is_dismissed, created_at, updated_at FROM events   ORDER BY start_time ASC LIMIT 50"
                                 )
                                 .fetch_all(&db.pool)
                                 .await
@@ -472,7 +497,7 @@ impl Application for OpenChimeApp {
                                 }
                             })
                         } else {
-                             self.last_sync_time = Some(chrono::Utc::now());
+                             self.ui_state.last_sync_time = Some(chrono::Utc::now());
                              Command::none()
                         }
                     }
@@ -603,9 +628,9 @@ impl Application for OpenChimeApp {
                     .style(iced::theme::Text::Color(ZEN_ACCENT)),
                 
                 column![
-                    nav_button("Calendar", View::Calendar, self.current_view.clone(), Message::ShowCalendar),
-                    nav_button("Alerts", View::Alerts, self.current_view.clone(), Message::ShowAlerts),
-                    nav_button("Settings", View::Settings, self.current_view.clone(), Message::ShowSettings),
+                    nav_button("Calendar", View::Calendar, self.ui_state.current_view.clone(), Message::ShowCalendar),
+                    nav_button("Alerts", View::Alerts, self.ui_state.current_view.clone(), Message::ShowAlerts),
+                    nav_button("Settings", View::Settings, self.ui_state.current_view.clone(), Message::ShowSettings),
                 ]
                 .spacing(5),
                 
@@ -616,10 +641,10 @@ impl Application for OpenChimeApp {
                         text("Status")
                             .size(12)
                             .style(iced::theme::Text::Color(ZEN_SUBTEXT)),
-                        text(&self.sync_status)
+                        text(&self.ui_state.sync_status)
                             .size(11)
                             .style(iced::theme::Text::Color(ZEN_TEXT)),
-                        text(if let Some(last) = self.last_sync_time {
+                        text(if let Some(last) = self.ui_state.last_sync_time {
                            format!("Synced: {}", last.format("%H:%M"))
                         } else {
                            "Not synced".to_string()
@@ -640,7 +665,7 @@ impl Application for OpenChimeApp {
         .style(iced::theme::Container::Custom(Box::new(SidebarStyle)));
 
         let content = container(
-            match self.current_view {
+            match self.ui_state.current_view {
                 View::Calendar => self.view_calendar(),
                 View::Settings => self.view_settings(),
                 View::Alerts => self.view_alerts(),
@@ -871,8 +896,8 @@ impl OpenChimeApp {
                     .style(iced::theme::Text::Color(ZEN_TEXT))
                     .width(Length::Fill),
                 
-                button(if self.loading { "Syncing..." } else { "Sync Now" })
-                    .style(if self.loading { 
+                button(if self.ui_state.loading { "Syncing..." } else { "Sync Now" })
+                    .style(if self.ui_state.loading { 
                          iced::theme::Button::Custom(Box::new(ActiveNavStyle)) // Greyed look
                     } else {
                          iced::theme::Button::Custom(Box::new(PrimaryButtonStyle))
@@ -1029,7 +1054,7 @@ impl OpenChimeApp {
                     text("Account Label")
                         .size(12)
                         .style(iced::theme::Text::Color(ZEN_SUBTEXT)),
-                    text_input("e.g., Work Calendar", &self.account_name)
+                    text_input("e.g., Work Calendar", &self.ui_state.account_name)
                         .padding(10)
                         .on_input(Message::AccountNameChanged),
                 ].spacing(5),
@@ -1038,7 +1063,7 @@ impl OpenChimeApp {
                     text("ICS Feed URL")
                         .size(12)
                         .style(iced::theme::Text::Color(ZEN_SUBTEXT)),
-                    text_input("https://...", &self.ics_url)
+                    text_input("https://...", &self.ui_state.ics_url)
                         .padding(10)
                         .on_input(Message::IcsUrlChanged),
                 ].spacing(5),
@@ -1250,8 +1275,25 @@ async fn main() -> iced::Result {
     info!("Starting OpenChime with iced UI");
 
     // Initialize core components
-    let db = Arc::new(Database::new().await.expect("Failed to initialize database"));
-    let audio = Arc::new(AudioManager::new().expect("Failed to initialize audio"));
+    let db = match Database::new().await {
+        Ok(database) => Arc::new(database),
+        Err(e) => {
+            error!("Failed to initialize database: {}", e);
+            eprintln!("Failed to initialize database: {}", e);
+            eprintln!("Please check your system and try again.");
+            std::process::exit(1);
+        }
+    };
+    
+    let audio = match AudioManager::new() {
+        Ok(audio_manager) => Arc::new(audio_manager),
+        Err(e) => {
+            warn!("Failed to initialize audio system: {}", e);
+            warn!("Continuing without audio - audio features will be disabled");
+            // Continue without audio - create a dummy audio manager
+            Arc::new(AudioManager::new_dummy())
+        }
+    };
 
     // Run iced application
     OpenChimeApp::run(IcedSettings {
