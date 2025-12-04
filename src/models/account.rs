@@ -1,4 +1,5 @@
 // file: src/account.rs
+// ICS-only mode - OAuth and encryption removed
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
@@ -62,6 +63,9 @@ impl Account {
             _ => Err(format!("Unknown provider: {}", self.provider)),
         }
     }
+
+    // Encryption methods removed - ICS-only mode doesn't need encryption
+    // ICS URLs are public/semi-public links, not secret OAuth tokens
 }
 
 #[cfg(test)]

@@ -1,13 +1,23 @@
 // file: src/database.rs
 
 use anyhow::{Context, Result};
-use log::info;
-use sqlx::{migrate::MigrateDatabase, sqlite::SqlitePool, Sqlite, Row};
+use log::{info, debug, warn};
+use sqlx::{migrate::MigrateDatabase, sqlite::{SqlitePool, SqlitePoolOptions, SqliteConnectOptions}, Sqlite, Row};
+use std::time::Duration;
+use std::str::FromStr;
 
 // Declare submodules
 pub mod accounts;
 pub mod events;
 pub mod settings;
+
+/// Connection pool statistics for monitoring
+#[derive(Debug, Clone)]
+pub struct PoolStats {
+    pub size: u32,
+    pub idle: usize,
+    pub is_closed: bool,
+}
 
 #[derive(Clone)]
 pub struct Database {
@@ -16,6 +26,10 @@ pub struct Database {
 
 impl Database {
     pub async fn new() -> Result<Self> {
+        Self::new_with_retries(3).await
+    }
+
+    pub async fn new_with_retries(max_retries: u32) -> Result<Self> {
         let db_path = "sqlite:openchime.db?mode=rwc";
 
         // Create database if it doesn't exist
@@ -29,10 +43,59 @@ impl Database {
                 .context("Failed to create database")?;
         }
 
-        // Connect to database
-        let pool = SqlitePool::connect(db_path)
-            .await
-            .context("Failed to connect to database")?;
+        // Configure connection options with timeouts
+        let connect_options = SqliteConnectOptions::from_str(db_path)
+            .context("Failed to parse database URL")?
+            .busy_timeout(Duration::from_secs(10))  // Wait up to 10s for locks
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)  // WAL mode for better concurrency
+            .synchronous(sqlx::sqlite::SqliteSynchronous::Normal);  // Balance safety/performance
+
+        // Configure connection pool with explicit limits
+        let pool_options = SqlitePoolOptions::new()
+            .max_connections(5)  // Limit concurrent connections (SQLite recommendation)
+            .min_connections(1)  // Keep 1 connection alive
+            .acquire_timeout(Duration::from_secs(30))  // Wait up to 30s to acquire connection
+            .idle_timeout(Duration::from_secs(300))  // Close idle connections after 5 minutes
+            .max_lifetime(Duration::from_secs(1800))  // Recycle connections after 30 minutes
+            .test_before_acquire(true);  // Validate connections before use
+
+        // Connect to database with retries for transient failures
+        let mut last_error = None;
+        let pool = 'retry_loop: loop {
+            for attempt in 1..=max_retries {
+                debug!("Database connection attempt {}/{}", attempt, max_retries);
+
+                match pool_options.clone().connect_with(connect_options.clone()).await {
+                    Ok(pool) => {
+                        info!("Database connection established");
+                        break 'retry_loop pool;
+                    }
+                    Err(e) => {
+                        warn!("Database connection attempt {} failed: {}", attempt, e);
+                        last_error = Some(e);
+
+                        if attempt < max_retries {
+                            // Exponential backoff: 100ms, 200ms, 400ms...
+                            let backoff = Duration::from_millis(100 * 2u64.pow(attempt - 1));
+                            debug!("Retrying after {:?}", backoff);
+                            tokio::time::sleep(backoff).await;
+                        }
+                    }
+                }
+            }
+
+            // All retries exhausted
+            return Err(last_error.unwrap())
+                .context("Failed to connect to database after all retries");
+        };
+
+        // Log connection pool metrics
+        debug!(
+            "Connection pool configured: max={}, min={}, idle_timeout={:?}",
+            pool.options().get_max_connections(),
+            pool.options().get_min_connections(),
+            pool.options().get_idle_timeout()
+        );
 
         // Run schema migrations
         run_schema(&pool).await.context("Failed to run database schema")?;
@@ -40,9 +103,28 @@ impl Database {
         // Ensure specific migrations for existing databases
         ensure_migrations(&pool).await.context("Failed to ensure migrations")?;
 
-        info!("Database initialized successfully");
+        info!("Database initialized successfully (ICS-only mode - encryption migrations removed)");
 
         Ok(Database { pool })
+    }
+
+    /// Gracefully close the database connection pool
+    ///
+    /// This should be called on application shutdown to ensure all connections
+    /// are properly closed and no data is lost.
+    pub async fn close(&self) {
+        info!("Closing database connection pool");
+        self.pool.close().await;
+        info!("Database connection pool closed");
+    }
+
+    /// Get connection pool statistics for monitoring
+    pub fn pool_stats(&self) -> PoolStats {
+        PoolStats {
+            size: self.pool.size(),
+            idle: self.pool.num_idle(),
+            is_closed: self.pool.is_closed(),
+        }
     }
 
     // --- Event Delegates ---

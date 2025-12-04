@@ -29,3 +29,6 @@ target
 *.db
 *.db-shm
 *.db-wal
+
+# Google OAuth
+client_secret*.json

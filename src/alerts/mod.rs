@@ -16,10 +16,16 @@ pub enum MonitorEvent {
 
 pub async fn monitor_meetings(state: Arc<AppState>, sender: Option<Sender<MonitorEvent>>) {
     info!("Starting meeting monitor loop");
-    
+
     let mut last_sync = Utc::now();
-    
+
     loop {
+        // Check for shutdown signal
+        if state.shutdown.is_cancelled() {
+            info!("Shutdown signal received, stopping monitor loop");
+            break;
+        }
+
         match monitor_cycle(&state, &mut last_sync, &sender).await {
             Ok(_) => {
                 debug!("Monitor cycle completed successfully");
@@ -31,10 +37,20 @@ pub async fn monitor_meetings(state: Arc<AppState>, sender: Option<Sender<Monito
                 }
             }
         }
-        
-        // Sleep for 30 seconds between checks
-        sleep(Duration::from_secs(30)).await;
+
+        // Sleep for 30 seconds between checks, but wake on shutdown
+        tokio::select! {
+            _ = sleep(Duration::from_secs(30)) => {
+                // Normal sleep completed, continue loop
+            }
+            _ = state.shutdown.cancelled() => {
+                info!("Shutdown signal received during sleep, stopping monitor loop");
+                break;
+            }
+        }
     }
+
+    info!("Meeting monitor loop stopped gracefully");
 }
 
 async fn monitor_cycle(state: &AppState, last_sync: &mut chrono::DateTime<Utc>, sender: &Option<Sender<MonitorEvent>>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -298,14 +314,15 @@ mod tests {
     fn test_should_trigger_alert_regular_meeting() {
         let event_30_sec_away = create_test_event(0, false); // 30 seconds away
         let event_1_min_away = create_test_event(1, false);
-        // Use 3 minutes to safely ensure it's > 1 minute
         let event_3_min_away = create_test_event(3, false);
+        let event_5_min_away = create_test_event(5, false);
         let event_past = create_test_event(-1, false);
 
-        assert!(should_trigger_alert(&event_30_sec_away)); // <= 1 min threshold
-        assert!(should_trigger_alert(&event_1_min_away)); // 1 min <= 1 min threshold
-        assert!(!should_trigger_alert(&event_3_min_away)); // 3 min > 1 min threshold
-        assert!(!should_trigger_alert(&event_past)); // Past event
+        assert!(should_trigger_alert(&event_30_sec_away)); // 0 is in 0..=3 range
+        assert!(should_trigger_alert(&event_1_min_away)); // 1 is in 0..=3 range
+        assert!(should_trigger_alert(&event_3_min_away)); // 3 is in 0..=3 range
+        assert!(!should_trigger_alert(&event_5_min_away)); // 5 > 3, outside range
+        assert!(!should_trigger_alert(&event_past)); // Past event (-1 not in 0..=3)
     }
 
     #[tokio::test]
@@ -333,9 +350,10 @@ mod tests {
         // Create a mock audio manager that doesn't actually play sound
         let audio = AudioManager::new().unwrap();
         let db = crate::database::Database { pool };
-        let state = Arc::new(crate::AppState { 
-            db: std::sync::Arc::new(db), 
-            audio: std::sync::Arc::new(audio)
+        let state = Arc::new(crate::AppState {
+            db: std::sync::Arc::new(db),
+            audio: std::sync::Arc::new(audio),
+            shutdown: tokio_util::sync::CancellationToken::new(),
         });
 
         let result = trigger_manual_alert(999, &state).await;
@@ -375,7 +393,11 @@ mod tests {
         let schema = include_str!("../database/schema.sql");
         sqlx::query(schema).execute(&pool).await.unwrap();
         let db = Arc::new(crate::database::Database { pool });
-        let state = Arc::new(crate::AppState { db, audio });
+        let state = Arc::new(crate::AppState {
+            db,
+            audio,
+            shutdown: tokio_util::sync::CancellationToken::new(),
+        });
 
         // This should not panic even if sound file doesn't exist
         let result = play_alert_sound(&event, &state, crate::models::AlertType::VideoMeeting).await;

@@ -5,9 +5,8 @@ use iced::{Element, Color, Background, Border, Shadow, Vector, Theme};
 
 use crate::models::{CalendarEvent, Account};
 
-pub mod calendar;
-pub mod settings;
-pub mod alerts;
+
+pub mod styles;
 
 // --- ZEN THEME PALETTE ---
 pub mod palette {
@@ -24,7 +23,7 @@ pub mod palette {
 
 // --- REUSABLE STYLES ---
 
-pub fn card_style(theme: &Theme) -> container::Appearance {
+pub fn card_style(_theme: &Theme) -> container::Appearance {
     container::Appearance {
         background: Some(Background::Color(palette::SURFACE)),
         border: Border {
@@ -43,14 +42,19 @@ pub fn card_style(theme: &Theme) -> container::Appearance {
 
 // --- COMPONENT VIEWS ---
 
-pub fn view_event(event: &CalendarEvent) -> Element<crate::Message> {
+pub fn view_event(event: &CalendarEvent) -> Element<'_, crate::messages::Message> {
     let is_video = event.is_video_meeting();
-    
+
     let icon = if is_video { "📹" } else { "📅" };
+
+    // Convert UTC times to local timezone for display
+    let local_start = event.start_time.with_timezone(&chrono::Local);
+    let local_end = event.end_time.with_timezone(&chrono::Local);
+
     let time_str = format!(
-        "{} - {}", 
-        event.start_time.format("%H:%M"), 
-        event.end_time.format("%H:%M")
+        "{} - {}",
+        local_start.format("%H:%M"),
+        local_end.format("%H:%M")
     );
 
     // A visual strip on the left to indicate event type
@@ -82,7 +86,7 @@ pub fn view_event(event: &CalendarEvent) -> Element<crate::Message> {
     .into()
 }
 
-pub fn view_account(account: &Account) -> Element<crate::Message> {
+pub fn view_account(account: &Account) -> Element<'_, crate::messages::Message> {
     container(
         column![
             row![
@@ -102,7 +106,7 @@ pub fn view_account(account: &Account) -> Element<crate::Message> {
     .into()
 }
 
-pub fn status_badge(label: &str, is_positive: bool) -> Element<crate::Message> {
+pub fn status_badge(label: &str, is_positive: bool) -> Element<'_, crate::messages::Message> {
     let (bg, text_color) = if is_positive {
         (Color::from_rgba(0.45, 0.55, 0.50, 0.2), palette::ACCENT) // Sage tint
     } else {
@@ -120,7 +124,7 @@ pub fn status_badge(label: &str, is_positive: bool) -> Element<crate::Message> {
 }
 
 // Helper for section headers
-pub fn section_header(label: &str) -> Element<crate::Message> {
+pub fn section_header(label: &str) -> Element<'_, crate::messages::Message> {
     text(label)
         .size(20)
         .style(palette::ACCENT)

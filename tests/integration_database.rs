@@ -11,13 +11,7 @@ async fn create_test_database() -> Database {
     
     // Run schema
     let schema = include_str!("../src/database/schema.sql");
-    for statement in schema.split(';') {
-        let trimmed = statement.trim();
-        if trimmed.is_empty() || trimmed.starts_with("--") {
-            continue;
-        }
-        sqlx::query(trimmed).execute(&pool).await.unwrap();
-    }
+    sqlx::query(schema).execute(&pool).await.unwrap();
     
     Database { pool }
 }

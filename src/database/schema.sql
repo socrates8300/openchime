@@ -2,13 +2,16 @@
 -- Local-first SQLite database for calendar events and settings
 
 -- Accounts table: Stores authentication info for calendar providers
+-- Note: auth_data and refresh_token are encrypted at rest using AES-256-GCM
 CREATE TABLE IF NOT EXISTS accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     provider TEXT NOT NULL CHECK (provider IN ('google', 'proton')),
     account_name TEXT NOT NULL,
-    auth_data TEXT NOT NULL, -- JSON: OAuth tokens for Google, ICS URL for Proton
-    refresh_token TEXT,
+    auth_data TEXT NOT NULL, -- Encrypted: OAuth tokens for Google, ICS URL for Proton
+    refresh_token TEXT,      -- Encrypted: OAuth refresh token (Google only)
     last_synced_at DATETIME,
+    encryption_version INTEGER DEFAULT 1, -- Tracks encryption algorithm version (1 = AES-256-GCM)
+    encrypted_at DATETIME DEFAULT CURRENT_TIMESTAMP, -- When tokens were encrypted
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -64,4 +67,19 @@ INSERT OR IGNORE INTO settings (key, value) VALUES
 CREATE INDEX IF NOT EXISTS idx_events_start_time ON events(start_time);
 CREATE INDEX IF NOT EXISTS idx_events_account_id ON events(account_id);
 CREATE INDEX IF NOT EXISTS idx_events_external_id ON events(external_id);
+CREATE INDEX IF NOT EXISTS idx_events_alert ON events(has_alerted, is_dismissed, start_time);
 CREATE INDEX IF NOT EXISTS idx_accounts_provider ON accounts(provider);
+
+-- Schema Migrations table: Tracks applied database migrations
+-- Used by the migration system to ensure idempotent migrations
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    checksum TEXT -- Reserved for future use (migration file integrity verification)
+);
+
+-- Mark baseline schema as migration version 1
+-- This allows the migration system to track schema evolution
+INSERT OR IGNORE INTO schema_migrations (version, name)
+VALUES (1, 'baseline_schema');

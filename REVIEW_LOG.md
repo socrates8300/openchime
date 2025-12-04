@@ -107,3 +107,12 @@
 2. Validate assumptions about OAuth security and performance requirements
 3. Assess test coverage for critical paths
 4. Review external API integration patterns for resilience
+
+## Pass 0 - Scope and Plan (Opencode Session)
+- **Date:** 2025-11-23
+- **Reviewer:** Opencode
+- **Focus:** Scope definition and discrepancy analysis.
+- **Status:**
+    - Verified project structure: Rust + Iced (diverges from Tauri spec).
+    - Detected contradiction: `main.rs` refactor marked complete in Backlog but flagged as high risk in previous Log.
+    - Validated Critical Risk: OAuth tokens stored as plaintext in `schema.sql`.

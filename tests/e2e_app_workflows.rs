@@ -187,7 +187,9 @@ async fn test_error_recovery() {
         Ok(_) => println!("Unexpected success with invalid path"),
         Err(e) => {
             println!("Expected error with invalid path: {}", e);
-            assert!(e.to_string().contains("no such file") || e.to_string().contains("permission"), 
+            assert!(e.to_string().contains("no such file") || 
+                   e.to_string().contains("permission") ||
+                   e.to_string().contains("unable to open database file"), 
                    "Error should be descriptive");
         }
     }

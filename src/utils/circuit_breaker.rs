@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -56,31 +55,39 @@ impl CircuitBreaker {
         Fut: std::future::Future<Output = Result<T>> + Send,
     {
         // Check if circuit is open
-        {
+        let should_try_half_open = {
             let state = self.state.read().await;
             let last_failure = self.last_failure_time.read().await;
             
             match *state {
                 CircuitState::Open => {
                     if let Some(failure_time) = *last_failure {
-                        if failure_time.elapsed() > self.config.timeout {
-                            // Transition to half-open
-                            *self.state.write().await = CircuitState::HalfOpen;
-                            *self.success_count.write().await = 0;
-                            info!("Circuit breaker transitioning to half-open after timeout");
-                        } else {
-                            return Err(anyhow::anyhow!("Circuit breaker is open"));
-                        }
+                        failure_time.elapsed() > self.config.timeout
                     } else {
-                        return Err(anyhow::anyhow!("Circuit breaker is open"));
+                        false
                     }
                 }
-                CircuitState::HalfOpen => {
-                    // Allow limited requests in half-open state
-                }
-                CircuitState::Closed => {
-                    // Normal operation
-                }
+                CircuitState::HalfOpen => false, // Already half-open, allow through
+                CircuitState::Closed => false,
+            }
+        };
+
+        if should_try_half_open {
+             // Transition to half-open
+             let mut state = self.state.write().await;
+             // Double check state hasn't changed
+             if matches!(*state, CircuitState::Open) {
+                 *state = CircuitState::HalfOpen;
+                 *self.success_count.write().await = 0;
+                 info!("Circuit breaker transitioning to half-open after timeout");
+             }
+        }
+
+        // Re-check state for blocking
+        {
+            let state = self.state.read().await;
+            if matches!(*state, CircuitState::Open) {
+                 return Err(anyhow::anyhow!("Circuit breaker is open"));
             }
         }
 

@@ -3,28 +3,26 @@ use anyhow::Result;
 use sqlx::SqlitePool;
 
 pub async fn get_upcoming(pool: &SqlitePool) -> Result<Vec<crate::models::CalendarEvent>> {
+    // This function is used for the alerts page, showing events in the next few days
+    // NOT used for the main calendar view (which loads 6 months of events)
     let now = chrono::Utc::now();
-    let end_of_day = now
-        .date_naive()
-        .and_hms_opt(23, 59, 59)
-        .unwrap()
-        .and_utc();
+    let days_ahead = now + chrono::Duration::days(3); // Show next 3 days
 
     let events = sqlx::query_as::<_, crate::models::CalendarEvent>(
         r#"
-        SELECT 
+        SELECT
             id, external_id, account_id, title, description, start_time, end_time,
             video_link, video_platform, snooze_count, has_alerted, last_alert_threshold,
             is_dismissed, created_at, updated_at
-        FROM events 
-        WHERE start_time >= ? 
+        FROM events
+        WHERE start_time >= ?
             AND start_time <= ?
             AND is_dismissed = 0
         ORDER BY start_time ASC
         "#,
     )
     .bind(now)
-    .bind(end_of_day)
+    .bind(days_ahead)
     .fetch_all(pool)
     .await?;
 

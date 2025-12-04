@@ -4,12 +4,11 @@
 
 use crate::models::{Account, CalendarEvent, SyncResult};
 use crate::utils;
-use crate::utils::{logging, circuit_breaker::get_circuit_breaker};
-use crate::utils::retry::RetryConfig;
+use crate::utils::logging;
+use crate::calendar::common;
 use anyhow::{anyhow, Result};
-use chrono::{DateTime, Utc, TimeZone, Datelike};
+use chrono::Utc;
 use icalendar::{Component, Event as IcsEvent, EventLike, Calendar as IcsCalendar};
-use reqwest::Client;
 use sqlx::SqlitePool;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -25,7 +24,7 @@ pub async fn sync_proton_calendar(account: &Account, pool: &SqlitePool) -> Resul
     log::info!("Fetching ICS data from URL: {}", ics_url);
     
     // Fetch ICS data
-    let ics_data = fetch_ics_data(ics_url).await?;
+    let ics_data = common::fetch_ics_data(ics_url, "proton_calendar").await?;
     log::info!("Fetched {} bytes of ICS data", ics_data.len());
     
     // Parse ICS data
@@ -71,7 +70,7 @@ pub async fn test_connection(account: &Account) -> Result<bool> {
     
     logging::log_auth_event("Proton ICS connection test", &account.account_name);
     
-    match fetch_ics_data(ics_url).await {
+    match common::fetch_ics_data(ics_url, "proton_calendar").await {
         Ok(_) => {
             log::info!("Proton ICS connection successful for: {}", account.account_name);
             Ok(true)
@@ -84,7 +83,7 @@ pub async fn test_connection(account: &Account) -> Result<bool> {
 }
 
 pub async fn validate_ics_url(ics_url: &str) -> Result<bool> {
-    match fetch_ics_data(ics_url).await {
+    match common::fetch_ics_data(ics_url, "proton_calendar").await {
         Ok(ics_data) => {
             // Try to parse the ICS data to ensure it's valid
             match IcsCalendar::from_str(&ics_data) {
@@ -103,60 +102,6 @@ pub async fn validate_ics_url(ics_url: &str) -> Result<bool> {
             Ok(false)
         }
     }
-}
-
-async fn fetch_ics_data(ics_url: &str) -> Result<String> {
-    let retry_config = RetryConfig {
-        max_attempts: 3,
-        base_delay: std::time::Duration::from_millis(1000),
-        max_delay: std::time::Duration::from_secs(20),
-        backoff_multiplier: 2.0,
-    };
-    
-    let circuit_breaker = get_circuit_breaker("proton_calendar").await;
-    let ics_url_str = ics_url.to_string();
-    
-    circuit_breaker.execute(move || {
-        let config = retry_config.clone();
-        let url = ics_url_str.clone();
-        
-        async move {
-            utils::retry::retry_with_exponential_backoff(&config, move || {
-                let inner_url = url.clone();
-                Box::pin(async move {
-                    let client = Client::builder()
-                        .user_agent("OpenChime/1.0")
-                        .timeout(std::time::Duration::from_secs(30))
-                        .build()
-                        .map_err(|e| anyhow!("Failed to build client: {}", e))?;
-                    
-                    let response = client.get(&inner_url).send().await
-                        .map_err(|e| anyhow!("Request failed: {}", e))?;
-                    
-                    if !response.status().is_success() {
-                        let status = response.status();
-                        let text = response.text().await.unwrap_or_else(|_| "Unable to read error response".to_string());
-                        return Err(anyhow!("HTTP {}: {}", status, text));
-                    }
-                    
-                    let content = response.text().await
-                        .map_err(|e| anyhow!("Failed to read response body: {}", e))?;
-                        
-                    // Basic validation to catch HTML responses
-                    if content.trim().starts_with("<!DOCTYPE") || content.trim().starts_with("<html") {
-                        return Err(anyhow!("Invalid ICS URL: The server returned HTML instead of a calendar file. Please ensure you are using the 'Secret address in iCal format' from your calendar settings, not the web browser URL."));
-                    }
-                    
-                    // Basic verification of ICS header
-                    if !content.contains("BEGIN:VCALENDAR") {
-                         log::warn!("Content does not contain BEGIN:VCALENDAR.");
-                    }
-                    
-                    Ok(content)
-                })
-            }).await
-        }
-    }).await
 }
 
 fn parse_ics_data(ics_data: &str) -> Result<Vec<CalendarEvent>> {
@@ -199,12 +144,12 @@ fn convert_ics_event(ics_event: &IcsEvent) -> Result<CalendarEvent> {
     // Parse start and end times
     let start_time = ics_event.get_start()
         .as_ref()
-        .and_then(parse_ical_datetime)
+        .and_then(common::parse_ical_datetime)
         .unwrap_or_else(Utc::now);
     
     let end_time = ics_event.get_end()
         .as_ref()
-        .and_then(parse_ical_datetime)
+        .and_then(common::parse_ical_datetime)
         .unwrap_or_else(|| start_time + chrono::Duration::hours(1));
     
     // Generate unique ID from UID or create one
@@ -239,23 +184,6 @@ fn convert_ics_event(ics_event: &IcsEvent) -> Result<CalendarEvent> {
         created_at: Utc::now(),
         updated_at: Utc::now(),
     })
-}
-
-fn parse_ical_datetime(dt: &icalendar::DatePerhapsTime) -> Option<DateTime<Utc>> {
-    match dt {
-        icalendar::DatePerhapsTime::DateTime(dt) => {
-            match dt {
-                icalendar::CalendarDateTime::Utc(dt) => Some(dt.naive_utc().and_utc()),
-                icalendar::CalendarDateTime::Floating(dt) => Some(dt.and_utc()),
-                icalendar::CalendarDateTime::WithTimezone { date_time, .. } => Some(date_time.and_utc()),
-            }
-        }
-        icalendar::DatePerhapsTime::Date(date) => {
-            // For date-only events, assume start of day in UTC
-            Utc.with_ymd_and_hms(date.year(), date.month(), date.day(), 0, 0, 0)
-                .single()
-        }
-    }
 }
 
 async fn store_event(event: &CalendarEvent, account_id: i64, pool: &SqlitePool) -> Result<bool> {
@@ -321,5 +249,124 @@ async fn store_event(event: &CalendarEvent, account_id: i64, pool: &SqlitePool) 
             log::debug!("Added new event: {}", event.title);
             Ok(true) // Added
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_ics_url_valid_https() {
+        // Valid HTTPS URLs
+        assert!(common::validate_ics_url_format("https://calendar.proton.me/api/calendar/v1/url/abc123/calendar.ics").is_ok());
+        assert!(common::validate_ics_url_format("https://example.com/path/to/calendar.ics").is_ok());
+        assert!(common::validate_ics_url_format("https://calendar.google.com/calendar/ical/user@example.com/public/basic.ics").is_ok());
+    }
+
+    #[test]
+    fn test_validate_ics_url_rejects_http() {
+        // HTTP should be rejected for security
+        let result = common::validate_ics_url_format("http://calendar.proton.me/calendar.ics");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("HTTPS"));
+    }
+
+    #[test]
+    fn test_validate_ics_url_rejects_empty() {
+        // Empty URL should be rejected
+        let result = common::validate_ics_url_format("");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty"));
+
+        // Whitespace-only URL should be rejected
+        let result = common::validate_ics_url_format("   ");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty"));
+    }
+
+    #[test]
+    fn test_validate_ics_url_rejects_invalid_format() {
+        // Invalid URL format
+        let result = common::validate_ics_url_format("not-a-url");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid ICS URL format"));
+
+        // Missing scheme
+        let result = common::validate_ics_url_format("calendar.proton.me/calendar.ics");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_ics_url_rejects_localhost() {
+        // Localhost should be rejected for security
+        let result = common::validate_ics_url_format("https://localhost/calendar.ics");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("localhost"));
+
+        // 127.0.0.1 should be rejected
+        let result = common::validate_ics_url_format("https://127.0.0.1/calendar.ics");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_ics_url_rejects_local_network() {
+        // Local network addresses should be rejected
+        let test_cases = vec![
+            "https://192.168.1.1/calendar.ics",
+            "https://10.0.0.1/calendar.ics",
+            "https://172.16.0.1/calendar.ics",
+        ];
+
+        for url in test_cases {
+            let result = common::validate_ics_url_format(url);
+            assert!(result.is_err(), "Should reject local network URL: {}", url);
+            assert!(result.unwrap_err().to_string().contains("local network"));
+        }
+    }
+
+    #[test]
+    fn test_validate_ics_url_malformed() {
+        // Malformed URLs should be rejected
+        let test_cases = vec![
+            "https://",           // Missing domain
+            "https:// /path",     // Space in URL
+            "https://exa mple.com/calendar.ics", // Space in domain
+        ];
+
+        for url in test_cases {
+            let result = common::validate_ics_url_format(url);
+            assert!(result.is_err(), "Should reject malformed URL: {}", url);
+        }
+    }
+
+    #[test]
+    fn test_validate_ics_url_accepts_various_domains() {
+        // Various valid calendar service domains
+        let valid_urls = vec![
+            "https://calendar.proton.me/api/calendar/v1/url/secret/calendar.ics",
+            "https://outlook.office365.com/owa/calendar/123/calendar.ics",
+            "https://caldav.icloud.com/published/2/calendar.ics",
+            "https://p01-calendars.icloud.com/published/2/calendar",
+        ];
+
+        for url in valid_urls {
+            assert!(
+                common::validate_ics_url_format(url).is_ok(),
+                "Should accept valid URL: {}",
+                url
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_ics_url_warns_missing_path() {
+        // URL with no path should still pass but log warning
+        // (We can't test the log warning directly, but it should not error)
+        let result = common::validate_ics_url_format("https://example.com");
+        assert!(result.is_ok());
+
+        let result = common::validate_ics_url_format("https://example.com/");
+        assert!(result.is_ok());
     }
 }

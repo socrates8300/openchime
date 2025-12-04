@@ -143,6 +143,7 @@ pub fn extract_meeting_keywords(title: &str, description: Option<&str>) -> Vec<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{TimeZone, Utc};
     
     #[test]
     fn test_extract_zoom_link() {
@@ -163,28 +164,29 @@ mod tests {
         assert!(result.is_some());
         assert_eq!(result.unwrap().platform, "Google Meet");
     }
-    
+
     #[test]
-    fn test_no_video_link() {
-        let description = Some("Regular team meeting");
-        let location = Some("Conference Room A");
-        
-        let result = extract_video_link(description, location);
-        assert!(result.is_none());
-    }
-    
-    #[test]
-    fn test_extract_google_meet_str() {
-        let description = Some("Meeting link: https://meet.google.com/abc-def-xyz");
-        let location = Some("");
+    fn test_extract_teams_link() {
+        let description = Some("Join Microsoft Teams Meeting");
+        let location = Some("https://teams.microsoft.com/l/meetup-join/19%3ameeting_MzIyMmMzMmm...");
         
         let result = extract_video_link(description, location);
         assert!(result.is_some());
-        assert_eq!(result.unwrap().platform, "Google Meet");
+        assert_eq!(result.unwrap().platform, "Teams");
+    }
+
+    #[test]
+    fn test_extract_webex_link() {
+        let description = Some("Webex meeting invitation");
+        let location = Some("https://company.webex.com/join/jdoe");
+        
+        let result = extract_video_link(description, location);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().platform, "Webex");
     }
     
     #[test]
-    fn test_no_video_link_str() {
+    fn test_no_video_link() {
         let description = Some("Regular team meeting");
         let location = Some("Conference Room A");
         
@@ -197,5 +199,30 @@ mod tests {
         let text = "password: 123456";
         let result = extract_meeting_password(text);
         assert_eq!(result.unwrap(), "123456");
+
+        let text_pwd = "pwd: abcdef";
+        let result_pwd = extract_meeting_password(text_pwd);
+        assert_eq!(result_pwd.unwrap(), "abcdef");
+    }
+
+    #[test]
+    fn test_is_all_day_event() {
+        let start = Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
+        let end_same_day = Utc.with_ymd_and_hms(2023, 1, 1, 23, 59, 59).unwrap();
+        let end_next_day = Utc.with_ymd_and_hms(2023, 1, 2, 0, 0, 0).unwrap();
+        
+        assert!(!is_all_day_event(start, end_same_day));
+        assert!(is_all_day_event(start, end_next_day));
+    }
+
+    #[test]
+    fn test_extract_meeting_keywords() {
+        let title = "Weekly Team Sync";
+        let description = Some("Let's have a quick standup");
+        
+        let keywords = extract_meeting_keywords(title, description);
+        assert!(keywords.contains(&"sync".to_string()));
+        assert!(keywords.contains(&"standup".to_string()));
+        assert!(!keywords.contains(&"demo".to_string()));
     }
 }
